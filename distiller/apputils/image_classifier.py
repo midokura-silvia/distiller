@@ -502,8 +502,8 @@ def train(train_loader, model, criterion, optimizer, epoch,
         else:
             # for Early Exit case, the Top1 and Top5 stats are computed for each exit.
             for exitnum in range(args.num_exits):
-                errs['Top1_exit' + str(exitnum)] = args.exiterrors[exitnum].value(1)
-                errs['Top5_exit' + str(exitnum)] = args.exiterrors[exitnum].value(5)
+                errs['Top1_net_' + str(exitnum)] = args.exiterrors[exitnum].value(1)
+                errs['Top5_net_' + str(exitnum)] = args.exiterrors[exitnum].value(5)
 
         stats_dict = OrderedDict()
         for loss_name, meter in losses.items():
@@ -606,7 +606,9 @@ def train(train_loader, model, criterion, optimizer, epoch,
         end = time.time()
     #return acc_stats
     # NOTE: this breaks previous behavior, which returned a history of (top1, top5) values
-    return classerr.value(1), classerr.value(5), losses[OVERALL_LOSS_KEY]
+    classerr_1 = classerr.value(1) if classerr.n > 0 else np.nan #args.exiterrors[args.num_exits-1].value(1)
+    classerr_5 = classerr.value(5) if classerr.n > 0 else np.nan #args.exiterrors[args.num_exits-1].value(5)
+    return classerr_1, classerr_5, losses[OVERALL_LOSS_KEY]
 
 
 def validate(val_loader, model, criterion, loggers, args, epoch=-1):
@@ -767,7 +769,9 @@ def earlyexit_validate_loss(output, target, criterion, args):
         earlyexit_taken = False
         # take the exit using CrossEntropyLoss as confidence measure (lower is more confident)
         for exitnum in range(args.num_exits - 1):
-            if args.loss_exits[exitnum][batch_index] < args.earlyexit_thresholds[exitnum]:
+            prob = torch.softmax(output[exitnum][batch_index], 0)
+            #if args.loss_exits[exitnum][batch_index] < args.earlyexit_thresholds[exitnum]:
+            if max(prob) > args.earlyexit_thresholds[exitnum]:
                 # take the results from early exit since lower than threshold
                 args.exiterrors[exitnum].add(torch.tensor(np.array(output[exitnum].data[batch_index].cpu(), ndmin=2)),
                                              torch.full([1], target[batch_index], dtype=torch.long))
@@ -832,6 +836,7 @@ def evaluate_model(model, criterion, test_loader, loggers, activations_collector
         apputils.save_checkpoint(0, args.arch, model, optimizer=None, scheduler=scheduler,
                                  name='_'.join([args.name, checkpoint_name]) if args.name else checkpoint_name,
                                  dir=msglogger.logdir, extras={'quantized_top1': top1})
+
 
 def acts_quant_stats_collection(model, criterion, loggers, args):
     msglogger.info('Collecting quantization calibration stats based on {:.1%} of test dataset'
