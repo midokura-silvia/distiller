@@ -170,8 +170,8 @@ def _create_imagenet_model(arch, pretrained):
             # pretrained image available will raise NotImplementedError
             if not pretrained:
                 raise
-    if model is None and (arch in imagenet_extra_models.__dict__) and not pretrained:
-        model = imagenet_extra_models.__dict__[arch]()
+    if model is None and (arch in imagenet_extra_models.__dict__): # and not pretrained:
+        model = imagenet_extra_models.__dict__[arch](pretrained=pretrained)
     if model is None and (arch in pretrainedmodels.model_names):
         cadene = True
         model = pretrainedmodels.__dict__[arch](
