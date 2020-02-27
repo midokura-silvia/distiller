@@ -104,7 +104,8 @@ def patch_torchvision_mobilenet_v2(model):
 _model_extensions = {}
 
 
-def create_model(pretrained, dataset, arch, parallel=True, device_ids=None):
+def create_model(pretrained, dataset, arch, parallel=True, device_ids=None,
+                 num_classes=None, strict=True, frozen=False):
     """Create a pytorch model based on the model architecture and dataset
 
     Args:
@@ -117,6 +118,12 @@ def create_model(pretrained, dataset, arch, parallel=True, device_ids=None):
             None - GPU if available, otherwise CPU
             -1 - CPU
             >=0 - GPU device IDs
+        num_classes: Number of classes in the classification problem.
+                     If None, it uses the 1000 of ILSVRC
+        strict: Whether to enforce a strict matching between the pretrained
+                checkpoint and the network specification
+        frozen: Whether to froze the trunk of the network during training.
+                Only works for resnet early exit
     """
     dataset = dataset.lower()
     if dataset not in SUPPORTED_DATASETS:
@@ -126,7 +133,8 @@ def create_model(pretrained, dataset, arch, parallel=True, device_ids=None):
     cadene = False
     try:
         if dataset == 'imagenet':
-            model, cadene = _create_imagenet_model(arch, pretrained)
+            model, cadene = _create_imagenet_model(arch, pretrained, num_classes=num_classes,
+                                                   strict=strict, frozen=frozen)
         elif dataset == 'cifar10':
             model = _create_cifar10_model(arch, pretrained)
         elif dataset == 'mnist':
@@ -158,7 +166,7 @@ def create_model(pretrained, dataset, arch, parallel=True, device_ids=None):
     return model.to(device)
 
 
-def _create_imagenet_model(arch, pretrained):
+def _create_imagenet_model(arch, pretrained, num_classes=None, strict=True, frozen=False):
     dataset = "imagenet"
     cadene = False
     model = None
@@ -174,8 +182,9 @@ def _create_imagenet_model(arch, pretrained):
             # pretrained image available will raise NotImplementedError
             if not pretrained:
                 raise
-    if model is None and (arch in imagenet_extra_models.__dict__) and not pretrained:
-        model = imagenet_extra_models.__dict__[arch]()
+    if model is None and (arch in imagenet_extra_models.__dict__): # and not pretrained:
+        model = imagenet_extra_models.__dict__[arch](pretrained=pretrained, num_classes=num_classes,
+                                                     strict=strict, frozen=frozen)
     if model is None and (arch in pretrainedmodels.model_names):
         cadene = True
         model = pretrainedmodels.__dict__[arch](

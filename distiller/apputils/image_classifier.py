@@ -218,6 +218,8 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                         ' (default: resnet18)')
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
+    parser.add_argument('-c', '--num_classes', default=1000, type=int,
+                        help='number of classes in the dataset')
     parser.add_argument('--epochs', type=int, metavar='N', default=90,
                         help='number of total epochs to run (default: 90')
     parser.add_argument('-b', '--batch-size', default=256, type=int,
@@ -248,6 +250,10 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                         help='path to checkpoint to load weights from (excluding other fields) (experimental)')
     load_checkpoint_group.add_argument('--pretrained', dest='pretrained', action='store_true',
                         help='use pre-trained model')
+    load_checkpoint_group.add_argument("--strict", dest="strict", action="store_true",
+                                       help="Load checkpoint with strict constraints in shape and key matching")
+    load_checkpoint_group.add_argument("--frozen", dest="frozen", action="store_true",
+                                       help="Whether to froze all layers except for the classification ones")
     load_checkpoint_group.add_argument('--reset-optimizer', action='store_true',
                         help='Flag to override optimizer if resumed from checkpoint. This will reset epochs count.')
 
@@ -381,7 +387,8 @@ def _config_compute_device(args):
 def _init_learner(args):
     # Create the model
     model = create_model(args.pretrained, args.dataset, args.arch,
-                         parallel=not args.load_serialized, device_ids=args.gpus)
+                         parallel=not args.load_serialized, device_ids=args.gpus,
+                         num_classes=args.num_classes, strict=args.strict, frozen=args.frozen)
     compression_scheduler = None
 
     # TODO(barrh): args.deprecated_resume is deprecated since v0.3.1
@@ -520,8 +527,8 @@ def train(train_loader, model, criterion, optimizer, epoch,
         else:
             # For Early Exit case, the Top1 and Top5 stats are computed for each exit.
             for exitnum in range(args.num_exits):
-                errs['Top1_exit' + str(exitnum)] = args.exiterrors[exitnum].value(1)
-                errs['Top5_exit' + str(exitnum)] = args.exiterrors[exitnum].value(5)
+                errs['Top1_net_' + str(exitnum)] = args.exiterrors[exitnum].value(1)
+                errs['Top5_net_' + str(exitnum)] = args.exiterrors[exitnum].value(5)
 
         stats_dict = OrderedDict()
         for loss_name, meter in losses.items():
@@ -624,7 +631,9 @@ def train(train_loader, model, criterion, optimizer, epoch,
         end = time.time()
     #return acc_stats
     # NOTE: this breaks previous behavior, which returned a history of (top1, top5) values
-    return classerr.value(1), classerr.value(5), losses[OVERALL_LOSS_KEY]
+    classerr_1 = classerr.value(1) if classerr.n > 0 else np.nan #args.exiterrors[args.num_exits-1].value(1)
+    classerr_5 = classerr.value(5) if classerr.n > 0 else np.nan #args.exiterrors[args.num_exits-1].value(5)
+    return classerr_1, classerr_5, losses[OVERALL_LOSS_KEY]
 
 
 def validate(val_loader, model, criterion, loggers, args, epoch=-1):
@@ -664,6 +673,8 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1):
                                       ('Top5', classerr.value(5))])
         else:
             stats_dict = OrderedDict()
+            stats_dict["Time inference"] = inference_time.mean
+            stats_dict["Time evaluation"] = evaluation_time.mean
             for exitnum in range(args.num_exits):
                 la_string = 'LossAvg' + str(exitnum)
                 stats_dict[la_string] = args.losses_exits[exitnum].mean
@@ -693,6 +704,8 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1):
         args.exit_taken = [0] * args.num_exits
 
     batch_time = tnt.AverageValueMeter()
+    inference_time = tnt.AverageValueMeter()
+    evaluation_time = tnt.AverageValueMeter()
     total_samples = len(data_loader.sampler)
     batch_size = data_loader.batch_size
     if args.display_confusion:
@@ -708,7 +721,9 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1):
         for validation_step, (inputs, target) in enumerate(data_loader):
             inputs, target = inputs.to(args.device), target.to(args.device)
             # compute output from model
+            time_in = time.time()
             output = model(inputs)
+            inference_time.add(time.time() - time_in)
 
             if not _is_earlyexit(args):
                 # compute loss
@@ -719,7 +734,9 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1):
                 if args.display_confusion:
                     confusion.add(output.detach(), target)
             else:
+                time_in = time.time()
                 earlyexit_validate_loss(output, target, criterion, args)
+                evaluation_time.add(time.time() - time_in)
 
             # measure elapsed time
             batch_time.add(time.time() - end)
@@ -767,6 +784,7 @@ def earlyexit_validate_loss(output, target, criterion, args):
     # not doing batch processing for exit criteria - we do this as though it were batch size of 1,
     # but with a grouping of samples equal to the batch size.
     # Note that final group might not be a full batch - so determine actual size.
+    time_in = time.time()
     this_batch_size = target.size(0)
     earlyexit_validate_criterion = nn.CrossEntropyLoss(reduce=False).to(args.device)
 
@@ -780,7 +798,9 @@ def earlyexit_validate_loss(output, target, criterion, args):
         earlyexit_taken = False
         # take the exit using CrossEntropyLoss as confidence measure (lower is more confident)
         for exitnum in range(args.num_exits - 1):
-            if args.loss_exits[exitnum][batch_index] < args.earlyexit_thresholds[exitnum]:
+            prob = torch.softmax(output[exitnum][batch_index], 0)
+            #if args.loss_exits[exitnum][batch_index] < args.earlyexit_thresholds[exitnum]:
+            if torch.max(prob) > args.earlyexit_thresholds[exitnum]:
                 # take the results from early exit since lower than threshold
                 args.exiterrors[exitnum].add(torch.tensor(np.array(output[exitnum].data[batch_index].cpu(), ndmin=2)),
                                              torch.full([1], target[batch_index], dtype=torch.long))
@@ -900,6 +920,7 @@ def quantize_and_test_model(test_loader, model, criterion, args, loggers=None, s
     return test_res
 
 
+# def acts_quant_stats_collection(model, criterion, loggers, args):
 def acts_quant_stats_collection(model, criterion, loggers, args, test_loader=None, save_to_file=False):
     msglogger.info('Collecting quantization calibration stats based on {:.1%} of test dataset'
                    .format(args.qe_calibration))

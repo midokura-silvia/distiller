@@ -33,6 +33,7 @@ class EarlyExitMgr(object):
         for exit_point, exit_branch in exits_def:
             self.exit_points.append(exit_point)
             replaced_module = _find_module(model, exit_point)
+            print(replaced_module, exit_point)
             assert replaced_module is not None, "Could not find exit point {}".format(exit_point)
             parent_name, node_name = _split_module_name(exit_point)
             parent_module = _find_module(model, parent_name)
@@ -71,6 +72,8 @@ class EarlyExitMgr(object):
 def _find_module(model, mod_name):
     """Locate a module, given its full name"""
     for name, module in model.named_modules():
+        # if name == "layer1.1.conv3":
+        #     print(name, module, type(module))
         if name == mod_name:
             return module
     return None
