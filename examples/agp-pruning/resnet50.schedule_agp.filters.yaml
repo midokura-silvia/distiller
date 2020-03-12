@@ -196,7 +196,7 @@ policies:
 #     args:
 #       mini_batch_pruning_frequency: 1
     starting_epoch: 0
-    ending_epoch: 30
+    ending_epoch: 2
     frequency: 1
 
 #  - pruner:
@@ -208,7 +208,7 @@ policies:
 # After completeing the pruning, we perform network thinning and continue fine-tuning.
   - extension:
       instance_name: net_thinner
-    epochs: [31]
+    epochs: [3]
 
 
   - lr_scheduler:

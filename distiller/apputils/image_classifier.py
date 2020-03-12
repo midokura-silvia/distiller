@@ -227,6 +227,10 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                         help='number of total epochs to run (default: 90')
     parser.add_argument('-b', '--batch-size', default=256, type=int,
                         metavar='N', help='mini-batch size (default: 256)')
+    parser.add_argument('-f', '--freezing_schedule', default=None, type=str,
+                        help="What layers to freeze. Only works for ResNet-EarlyExit")
+    parser.add_argument('-i', '--inference_type', default=None, type=str,
+                        help="ONLY FOR RESNET EARLYEXIT. Which of the early exits to use in inference.")
 
     optimizer_args = parser.add_argument_group('Optimizer arguments')
     optimizer_args.add_argument('--lr', '--learning-rate', default=0.1,
@@ -255,8 +259,6 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                         help='use pre-trained model')
     load_checkpoint_group.add_argument("--strict", dest="strict", action="store_true",
                                        help="Load checkpoint with strict constraints in shape and key matching")
-    load_checkpoint_group.add_argument("--frozen", dest="frozen", action="store_true",
-                                       help="Whether to froze all layers except for the classification ones")
     load_checkpoint_group.add_argument('--reset-optimizer', action='store_true',
                         help='Flag to override optimizer if resumed from checkpoint. This will reset epochs count.')
 
@@ -391,7 +393,8 @@ def _init_learner(args):
     # Create the model
     model = create_model(args.pretrained, args.dataset, args.arch,
                          parallel=not args.load_serialized, device_ids=args.gpus,
-                         num_classes=args.num_classes, strict=args.strict, frozen=args.frozen)
+                         num_classes=args.num_classes, strict=args.strict,
+                         freezing_schedule=args.freezing_schedule, inference_type=args.inference_type)
     compression_scheduler = None
 
     # TODO(barrh): args.deprecated_resume is deprecated since v0.3.1
@@ -639,6 +642,7 @@ def train(train_loader, model, criterion, optimizer, epoch,
             _log_training_progress()
 
         end = time.time()
+
     #return acc_stats
     # NOTE: this breaks previous behavior, which returned a history of (top1, top5) values
     classerr_1 = classerr.value(1) if classerr.n > 0 else np.nan #args.exiterrors[args.num_exits-1].value(1)

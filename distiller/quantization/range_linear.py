@@ -457,11 +457,12 @@ class RangeLinearQuantWrapper(nn.Module):
         self.acts_min_q_val, self.acts_max_q_val = get_quantized_range(num_bits_acts, signed=signed,
                                                                        signed_restrict_qrange=restrict_qrange)
 
-        if activation_stats:
+        if activation_stats and "inputs" in activation_stats:
             self.preset_act_stats = True
 
             # Calculate inputs quantization parameters
             self.inputs_quant_metadata_fallback = OrderedDict()
+            print(activation_stats.keys())
             for idx, stats in activation_stats['inputs'].items():
                 settings = self.inputs_quant_settings_overrides.get(idx, self.output_quant_settings)
                 scale, zp = _get_quant_params_from_stats_dict(

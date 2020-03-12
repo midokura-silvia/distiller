@@ -62,6 +62,8 @@ def save_checkpoint(epoch, arch, model, optimizer=None, scheduler=None,
     filename_best = 'best.pth.tar' if name is None else name + '_best.pth.tar'
     fullpath_best = os.path.join(dir, filename_best)
 
+
+
     checkpoint = {'epoch': epoch, 'state_dict': model.state_dict(), 'arch': arch}
     try:
         checkpoint['is_parallel'] = model.is_parallel
@@ -105,8 +107,8 @@ def get_contents_table(d):
     return tabulate(contents, headers=["Key", "Type", "Value"], tablefmt="psql")
 
 
-def load_checkpoint(model, chkpt_file, optimizer=None,
-                    model_device=None, lean_checkpoint=False, strict=False):
+def load_checkpoint(model, chkpt_file, optimizer=None, model_device=None,
+                    lean_checkpoint=False, strict=False, compression_scheduler=None):
     """Load a pytorch training checkpoint.
 
     Args:
@@ -152,6 +154,26 @@ def load_checkpoint(model, chkpt_file, optimizer=None,
             # Initialize the dest_optimizer with a dummy learning rate,
             # this is required to support SGD.__init__()
             dest_optimizer = cls(model.parameters(), lr=1)
+
+            if compression_scheduler:
+                # If the compression scheduler contains a LR policy, we need to update that LR scheduler
+                # to use the optimizer that we'll be loading here
+                lr_policies = [policy for policy in compression_scheduler.sched_metadata if
+                               isinstance(policy, distiller.LRPolicy)]
+                lr_schedulers = [policy.lr_scheduler for policy in lr_policies if
+                                 isinstance(policy.lr_scheduler, torch.optim.lr_scheduler._LRScheduler)]
+                if lr_schedulers:
+                    # Create dummy scheduler so optimizer will be monkey-patched
+                    dummy_lr_sched = torch.optim.lr_scheduler.StepLR(dest_optimizer, 10)
+                    dest_optimizer._step_count = start_epoch
+                    # Then replace the optimizer in the LR scheduler/s
+                    for lrs in lr_schedulers:
+                        lrs.optimizer = dest_optimizer
+
+                # resumed_qat_policy = compression_scheduler.quantization_policy
+                # if resumed_qat_policy is not None:
+                #     resumed_qat_policy.quantizer.update_optimizer(dest_optimizer)
+
             dest_optimizer.load_state_dict(src_state_dict)
             msglogger.info('Optimizer of type {type} was loaded from checkpoint'.format(
                             type=type(dest_optimizer)))
@@ -182,6 +204,11 @@ def load_checkpoint(model, chkpt_file, optimizer=None,
             # One of the values is missing so we can't perform the comparison
             pass
 
+    def append_module_to_name(key):
+        if "module" in key:
+            return key
+        return "module." + key
+
     chkpt_file = os.path.expanduser(chkpt_file)
     if not os.path.isfile(chkpt_file):
         raise IOError(ENOENT, 'Could not find a checkpoint file at', chkpt_file)
@@ -204,10 +231,10 @@ def load_checkpoint(model, chkpt_file, optimizer=None,
 
     checkpoint_epoch = checkpoint.get('epoch', None)
     start_epoch = checkpoint_epoch + 1 if checkpoint_epoch is not None else 0
-    compression_scheduler = None
+
     normalize_dataparallel_keys = False
     if 'compression_sched' in checkpoint:
-        compression_scheduler = distiller.CompressionScheduler(model)
+        compression_scheduler = compression_scheduler or distiller.CompressionScheduler(model)
         normalize_dataparallel_keys = _load_compression_scheduler()
     else:
         msglogger.info("Warning: compression schedule data does not exist in the checkpoint")
@@ -221,13 +248,28 @@ def load_checkpoint(model, chkpt_file, optimizer=None,
     if 'quantizer_metadata' in checkpoint:
         msglogger.info('Loaded quantizer metadata from the checkpoint')
         qmd = checkpoint['quantizer_metadata']
-        quantizer = qmd['type'](model, **qmd['params'])
+        quantizer = None
+        if compression_scheduler is not None and compression_scheduler.quantization_policy is not None:
+            quantizer = compression_scheduler.quantization_policy.quantizer
+        if quantizer is not None:
+            assert model == quantizer.model
+            scheduled_qmd = model.quantizer_metadata
+            if scheduled_qmd['type'] != qmd['type']:
+                raise ValueError(
+                    'Scheduler contains quantizer of type {}, but trying to resume quantizer of type {}'.format(
+                        scheduled_qmd['type'], qmd['type']))
+            if scheduled_qmd['params'] != qmd['params']:
+                raise ValueError('Quantizer in scheduler initialized with different arguments compared to '
+                                 'quantizer in checkpoint')
+        else:
+            quantizer = qmd['type'](model, **qmd['params'])
         quantizer.prepare_model(qmd['dummy_input'])
 
         if qmd.get('pytorch_convert', False):
             msglogger.info('Converting Distiller PTQ model to PyTorch quantization API')
             model = quantizer.convert_to_pytorch(qmd['dummy_input'], backend=qmd.get('pytorch_convert_backend', None))
 
+    print("-----------------")
     if normalize_dataparallel_keys:
         checkpoint['state_dict'] = {normalize_module_name(k): v for k, v in checkpoint['state_dict'].items()}
     anomalous_keys = model.load_state_dict(checkpoint['state_dict'], strict)
@@ -237,9 +279,21 @@ def load_checkpoint(model, chkpt_file, optimizer=None,
         if unexpected_keys:
             msglogger.warning("Warning: the loaded checkpoint (%s) contains %d unexpected state keys" %
                               (chkpt_file, len(unexpected_keys)))
+
         if missing_keys:
-            raise ValueError("The loaded checkpoint (%s) is missing %d state keys" %
-                             (chkpt_file, len(missing_keys)))
+            checkpoint["state_dict"] = {append_module_to_name(k): v for k, v in checkpoint["state_dict"].items()}
+            anomalous_keys = model.load_state_dict(checkpoint["state_dict"], strict)
+            if anomalous_keys:
+                # This is pytorch 1.1+
+                missing_keys, unexpected_keys = anomalous_keys
+                if unexpected_keys:
+                    msglogger.warning("Warning: the loaded checkpoint (%s) contains %d unexpected state keys" %
+                                      (chkpt_file, len(unexpected_keys)))
+                if missing_keys:
+                    print(checkpoint["state_dict"].keys())
+                    print(missing_keys)
+                    raise ValueError("The loaded checkpoint (%s) is missing %d state keys" %
+                                     (chkpt_file, len(missing_keys)))
 
     if model_device is not None:
         model.to(model_device)
