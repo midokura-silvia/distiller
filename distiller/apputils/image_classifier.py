@@ -36,6 +36,7 @@ import distiller.apputils as apputils
 from distiller.data_loggers import *
 import distiller.quantization as quantization
 import distiller.models as models
+from distiller.models.imagenet.resnet import ResNetChunkType
 from distiller.models import create_model
 from distiller.utils import float_range_argparse_checker as float_range
 
@@ -68,7 +69,7 @@ class ClassifierCompressor(object):
             self.tflogger = TensorBoardLogger(msglogger.logdir)
             self.pylogger = PythonLogger(msglogger)
         (self.model, self.compression_scheduler, self.optimizer, 
-             self.start_epoch, self.ending_epoch) = _init_learner(self.args)
+             self.start_epoch, self.ending_epoch, self.scheduler) = _init_learner(self.args)
 
         # Define loss function (criterion)
         self.criterion = nn.CrossEntropyLoss().to(self.args.device)
@@ -76,7 +77,7 @@ class ClassifierCompressor(object):
         self.activations_collectors = create_activation_stats_collectors(
             self.model, *self.args.activation_stats)
         self.performance_tracker = apputils.SparsityAccuracyTracker(self.args.num_best_scores)
-    
+
     def load_datasets(self):
         """Load the datasets"""
         if not all((self.train_loader, self.val_loader, self.test_loader)):
@@ -109,6 +110,8 @@ class ClassifierCompressor(object):
     def train_one_epoch(self, epoch, verbose=True):
         """Train for one epoch"""
         self.load_datasets()
+        if self.scheduler is not None:
+            self.scheduler.step(epoch=epoch)
 
         with collectors_context(self.activations_collectors["train"]) as collectors:
             top1, top5, loss = train(self.train_loader, self.model, self.criterion, self.optimizer, 
@@ -227,9 +230,17 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                         help='number of total epochs to run (default: 90')
     parser.add_argument('-b', '--batch-size', default=256, type=int,
                         metavar='N', help='mini-batch size (default: 256)')
+    parser.add_argument('-z', '--optimizer', default=None, type=str,
+                        help='Which optimizer to use (default: SGD)')
+    parser.add_argument('-s', '--learning_rate_scheduler', default=None, type=str,
+                        help='Which learning rate scheduler to use (default: None)')
+    parser.add_argument('--mobilenet_mode', default="large", type=str,
+                        help='Which mobilenet-v3 configuration to use: large or small')
+    parser.add_argument('--mobilenet_early_exit_branch', default=None, type=str,
+                        help='Whether to use a subset of the mobilenet network for early exit strategies')
     parser.add_argument('-f', '--freezing_schedule', default=None, type=str,
                         help="What layers to freeze. Only works for ResNet-EarlyExit")
-    parser.add_argument('-i', '--inference_type', default=None, type=str,
+    parser.add_argument('-i', '--inference_type', default=ResNetChunkType.WHOLE_NETWORK, type=str,
                         help="ONLY FOR RESNET EARLYEXIT. Which of the early exits to use in inference.")
 
     optimizer_args = parser.add_argument_group('Optimizer arguments')
@@ -390,11 +401,15 @@ def _config_compute_device(args):
 
 
 def _init_learner(args):
+    kwargs = {key: getattr(args, key) for key in dir(args) if key[0] != '_'}
+    kwargs.pop("pretrained", None)
+    kwargs.pop("dataset", None)
+    kwargs.pop("arch", None)
     # Create the model
     model = create_model(args.pretrained, args.dataset, args.arch,
-                         parallel=not args.load_serialized, device_ids=args.gpus,
-                         num_classes=args.num_classes, strict=args.strict,
-                         freezing_schedule=args.freezing_schedule, inference_type=args.inference_type)
+                         parallel=not args.load_serialized, device_ids=args.gpus, **kwargs)
+    # num_classes=args.num_classes, strict=args.strict,
+    # freezing_schedule=args.freezing_schedule, inference_type=args.inference_type)
     compression_scheduler = None
 
     # TODO(barrh): args.deprecated_resume is deprecated since v0.3.1
@@ -410,14 +425,25 @@ def _init_learner(args):
 
     def default_optimizer(model, args):
         return torch.optim.SGD(model.parameters(),
-            lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+                               lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
     if args.compress:
-        optimizer = default_optimizer(model, args)
+        if args.optimizer is None:
+            print("SGD optimizer.")
+            optimizer = default_optimizer(model, args)
+        elif args.optimizer == "rmsprop":
+            print("RMSPROP optimizer.")
+            optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr,
+                                            momentum=args.momentum,
+                                            weight_decay=args.weight_decay)
+        else:
+            print("SGD optimizer.")
+            optimizer = default_optimizer(model, args)
+
         # The main use-case for this sample application is CNN compression. Compression
         # requires a compression schedule configuration file in YAML.
         compression_scheduler = distiller.file_config(model, optimizer, args.compress, compression_scheduler,
-            (start_epoch-1) if args.resumed_checkpoint_path else None)
+                                                      (start_epoch-1) if args.resumed_checkpoint_path else None)
         # Model is re-transferred to GPU in case parameters were added (e.g. PACTQuantizer)
         model.to(args.device)
     else:
@@ -427,6 +453,13 @@ def _init_learner(args):
         model, compression_scheduler, optimizer, start_epoch = apputils.load_checkpoint(
             model, args.resumed_checkpoint_path, model_device=args.device, compression_scheduler=compression_scheduler)
         if compression_scheduler.quantization_policy is not None:
+            args_qe = copy.deepcopy(args)
+
+            qe_model = copy.deepcopy(model).to(args.device)
+
+            quantizer = quantization.PostTrainLinearQuantizer.from_args(qe_model, args_qe)
+            dummy_input = distiller.get_dummy_input(input_shape=model.input_shape)
+            quantizer.prepare_model(dummy_input)
             compression_scheduler.quantization_policy.quantizer.update_optimizer(optimizer)
     elif args.load_model_path:
         model = apputils.load_lean_checkpoint(model, args.load_model_path, model_device=args.device)
@@ -437,11 +470,35 @@ def _init_learner(args):
             msglogger.info('\nreset_optimizer flag set: Overriding resumed optimizer and resetting epoch count to 0')
 
     if optimizer is None and not args.evaluate:
-        optimizer = default_optimizer(model, args)
+        if args.optimizer is None:
+            print("SGD optimizer")
+            optimizer = default_optimizer(model, args)
+        elif args.optimizer == "rmsprop":
+            print("RMSPROP optimizer")
+            optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr,
+                                            momentum=args.momentum,
+                                            weight_decay=args.weight_decay)
+        else:
+            print("SGD optimizer")
+            optimizer = default_optimizer(model, args)
         msglogger.debug('Optimizer Type: %s', type(optimizer))
         msglogger.debug('Optimizer Args: %s', optimizer.defaults)
 
-    return model, compression_scheduler, optimizer, start_epoch, args.epochs
+    if args.learning_rate_scheduler is None:
+        scheduler = None
+        print("No SCHEDULER")
+    elif args.learning_rate_scheduler == "cosine":
+        print("COSINE SCHEDULER")
+        prev_lr = [group["lr"] for group in optimizer.state_dict()["param_groups"]][0]
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
+
+        for index, group in enumerate(optimizer.state_dict()["param_groups"]):
+            optimizer.__dict__["param_groups"][index]["lr"] = prev_lr
+    else:
+        print("No SCHEDULER")
+        scheduler = None
+
+    return model, compression_scheduler, optimizer, start_epoch, args.epochs, scheduler
 
 
 def create_activation_stats_collectors(model, *phases):
@@ -950,7 +1007,7 @@ def acts_quant_stats_collection(model, criterion, loggers, args, test_loader=Non
                       loggers=loggers, args=args, activations_collectors=None)
     with distiller.get_nonparallel_clone_model(model) as cmodel:
         return collect_quant_stats(cmodel, test_fn, classes=None,
-                                   inplace_runtime_check=True, disable_inplace_attrs=True,
+                                   inplace_runtime_check=False, disable_inplace_attrs=True,
                                    save_dir=msglogger.logdir if save_to_file else None)
 
 

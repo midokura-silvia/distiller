@@ -103,26 +103,6 @@ class ResNetEarlyExit(ResNet):
         outputs = self.ee_mgr.get_exits_outputs(self) + [x]
         return outputs
 
-    def named_parameters(self, prefix='', recurse=True):
-        r"""Returns an iterator over module parameters, yielding both the
-        name of the parameter as well as the parameter itself.
-
-        Args:
-            prefix (str): prefix to prepend to all parameter names.
-            recurse (bool): if True, then yields parameters of this module
-                and all submodules. Otherwise, yields only parameters that
-                are direct members of this module.
-
-        Yields:
-            (string, Parameter): Tuple containing the name and parameter
-
-        """
-        gen = self._named_members(
-            lambda module: module._parameters.items(),
-            prefix=prefix, recurse=recurse)
-        for elem in gen:
-            yield elem
-
     def parameters(self, recurse=True):
         if self.first_parameter_call:
             print("PARAMETERS TO TRAIN")

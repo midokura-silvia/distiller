@@ -151,7 +151,7 @@ class ResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False,
                  groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None, inference_type=ResNetChunkType.WHOLE_NETWORK):
+                 norm_layer=None, inference_type=ResNetChunkType.WHOLE_NETWORK, **kwargs):
         super(ResNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -188,7 +188,7 @@ class ResNet(nn.Module):
             self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
             self.fc = nn.Linear(512 * block.expansion, num_classes)
 
-        if inference_type == ResNetChunkType.CHUNK_CLIENT:
+        elif inference_type == ResNetChunkType.CHUNK_CLIENT:
             self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
                                    bias=False)
             self.bn1 = norm_layer(self.inplanes)
@@ -206,7 +206,6 @@ class ResNet(nn.Module):
                                            dilate=replace_stride_with_dilation[2])
             self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
             self.fc = nn.Linear(512 * block.expansion, num_classes)
-
         elif inference_type == ResNetChunkType.EARLY_EXIT_1:
             self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
                                    bias=False)

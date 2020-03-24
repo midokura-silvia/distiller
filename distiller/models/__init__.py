@@ -104,8 +104,8 @@ def patch_torchvision_mobilenet_v2(model):
 _model_extensions = {}
 
 
-def create_model(pretrained, dataset, arch, parallel=True, device_ids=None,
-                 num_classes=None, strict=True, freezing_schedule=None, inference_type=None):
+def create_model(pretrained, dataset, arch, parallel=True, device_ids=None, **kwargs):
+    #              num_classes=None, strict=True, freezing_schedule=None, inference_type=None):
     """Create a pytorch model based on the model architecture and dataset
 
     Args:
@@ -133,9 +133,10 @@ def create_model(pretrained, dataset, arch, parallel=True, device_ids=None,
     cadene = False
     try:
         if dataset == 'imagenet':
-            model, cadene = _create_imagenet_model(arch, pretrained, num_classes=num_classes,
-                                                   strict=strict, freezing_schedule=freezing_schedule,
-                                                   inference_type=inference_type)
+            model, cadene = _create_imagenet_model(arch, pretrained, **kwargs)
+            #                                        num_classes=num_classes,
+            #                                        strict=strict, freezing_schedule=freezing_schedule,
+            #                                        inference_type=inference_type)
         elif dataset == 'cifar10':
             model = _create_cifar10_model(arch, pretrained)
         elif dataset == 'mnist':
@@ -167,7 +168,7 @@ def create_model(pretrained, dataset, arch, parallel=True, device_ids=None,
     return model.to(device)
 
 
-def _create_imagenet_model(arch, pretrained, num_classes=None, strict=True, freezing_schedule=None, inference_type=None):
+def _create_imagenet_model(arch, pretrained, **kwargs):
     dataset = "imagenet"
     cadene = False
     model = None
@@ -184,9 +185,7 @@ def _create_imagenet_model(arch, pretrained, num_classes=None, strict=True, free
             if not pretrained:
                 raise
     if model is None and (arch in imagenet_extra_models.__dict__):  # and not pretrained:
-        model = imagenet_extra_models.__dict__[arch](pretrained=pretrained, num_classes=num_classes,
-                                                     strict=strict, freezing_schedule=freezing_schedule,
-                                                     inference_type=inference_type)
+        model = imagenet_extra_models.__dict__[arch](pretrained=pretrained, **kwargs)
     if model is None and (arch in pretrainedmodels.model_names):
         cadene = True
         model = pretrainedmodels.__dict__[arch](

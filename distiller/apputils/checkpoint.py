@@ -269,7 +269,6 @@ def load_checkpoint(model, chkpt_file, optimizer=None, model_device=None,
             msglogger.info('Converting Distiller PTQ model to PyTorch quantization API')
             model = quantizer.convert_to_pytorch(qmd['dummy_input'], backend=qmd.get('pytorch_convert_backend', None))
 
-    print("-----------------")
     if normalize_dataparallel_keys:
         checkpoint['state_dict'] = {normalize_module_name(k): v for k, v in checkpoint['state_dict'].items()}
     anomalous_keys = model.load_state_dict(checkpoint['state_dict'], strict)
@@ -290,8 +289,6 @@ def load_checkpoint(model, chkpt_file, optimizer=None, model_device=None,
                     msglogger.warning("Warning: the loaded checkpoint (%s) contains %d unexpected state keys" %
                                       (chkpt_file, len(unexpected_keys)))
                 if missing_keys:
-                    print(checkpoint["state_dict"].keys())
-                    print(missing_keys)
                     raise ValueError("The loaded checkpoint (%s) is missing %d state keys" %
                                      (chkpt_file, len(missing_keys)))
 
