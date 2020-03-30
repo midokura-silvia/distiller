@@ -238,6 +238,8 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                         help='Which mobilenet-v3 configuration to use: large or small')
     parser.add_argument('--mobilenet_early_exit_branch', default=None, type=str,
                         help='Whether to use a subset of the mobilenet network for early exit strategies')
+    parser.add_argument('--mobilenet_early_exit_branch_version', default="v1", type=str,
+                        help='Which configuration to use for the mobilenet early exit branch (if applicable)')
     parser.add_argument('-f', '--freezing_schedule', default=None, type=str,
                         help="What layers to freeze. Only works for ResNet-EarlyExit")
     parser.add_argument('-i', '--inference_type', default=ResNetChunkType.WHOLE_NETWORK, type=str,
@@ -662,8 +664,8 @@ def train(train_loader, model, criterion, optimizer, epoch,
             acc_stats.append([classerr.value(1), classerr.value(5)])
         else:
             # Measure accuracy and record loss
-            classerr.add(output[args.num_exits-1].detach(), target) # add the last exit (original exit)
             loss = earlyexit_loss(output, target, criterion, args)
+            classerr.add(output[args.num_exits-1].detach(), target) # add the last exit (original exit)
         # Record loss
         losses[OBJECTIVE_LOSS_KEY].add(loss.item())
 
@@ -845,7 +847,8 @@ def earlyexit_loss(output, target, criterion, args):
         weighted_loss += args.earlyexit_lossweights[exitnum] * exit_loss
         args.exiterrors[exitnum].add(output[exitnum].detach(), target)
     # handle final exit
-    weighted_loss += (1.0 - sum_lossweights) * criterion(output[args.num_exits-1], target)
+    final_loss = criterion(output[args.num_exits-1], target)
+    weighted_loss += (1.0 - sum_lossweights) * final_loss
     args.exiterrors[args.num_exits-1].add(output[args.num_exits-1].detach(), target)
     return weighted_loss
 
@@ -855,7 +858,6 @@ def earlyexit_validate_loss(output, target, criterion, args):
     # not doing batch processing for exit criteria - we do this as though it were batch size of 1,
     # but with a grouping of samples equal to the batch size.
     # Note that final group might not be a full batch - so determine actual size.
-    time_in = time.time()
     this_batch_size = target.size(0)
     earlyexit_validate_criterion = nn.CrossEntropyLoss(reduce=False).to(args.device)
 
@@ -870,7 +872,7 @@ def earlyexit_validate_loss(output, target, criterion, args):
         # take the exit using CrossEntropyLoss as confidence measure (lower is more confident)
         for exitnum in range(args.num_exits - 1):
             prob = torch.softmax(output[exitnum][batch_index], 0)
-            #if args.loss_exits[exitnum][batch_index] < args.earlyexit_thresholds[exitnum]:
+            # if args.loss_exits[exitnum][batch_index] < args.earlyexit_thresholds[exitnum]:
             if torch.max(prob) > args.earlyexit_thresholds[exitnum]:
                 # take the results from early exit since lower than threshold
                 args.exiterrors[exitnum].add(torch.tensor(np.array(output[exitnum].data[batch_index].cpu(), ndmin=2)),
@@ -881,8 +883,17 @@ def earlyexit_validate_loss(output, target, criterion, args):
         # this sample does not exit early and therefore continues until final exit
         if not earlyexit_taken:
             exitnum = args.num_exits - 1
-            args.exiterrors[exitnum].add(torch.tensor(np.array(output[exitnum].data[batch_index].cpu(), ndmin=2)),
-                                         torch.full([1], target[batch_index], dtype=torch.long))
+            cpu_output = output[exitnum].data[batch_index].cpu()
+
+            np_output = np.array(cpu_output, ndmin=2)
+
+            torch_output = torch.tensor(np_output)
+
+            ground_truth = torch.full([1], target[batch_index], dtype=torch.long)
+
+            # TODO Think how to improve the performance of the following line,
+            #  it amounts to more than 90% of total validation time
+            args.exiterrors[exitnum].add(torch_output, ground_truth)
             args.exit_taken[exitnum] += 1
 
 

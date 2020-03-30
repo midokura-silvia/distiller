@@ -7,8 +7,10 @@ arXiv preprint arXiv:1905.02244.
 
 import torch.nn as nn
 import math
+import copy
 import torch
 import distiller
+import numpy as np
 
 from distiller.modules import BranchPoint
 
@@ -133,17 +135,85 @@ class InvertedResidual(nn.Module):
             return self.conv(x)
 
 
-def get_early_exit_definition(early_exit_position, num_classes):
+def get_early_exit_definition(early_exit_position, early_exit_version, num_classes):
     if early_exit_position == 1:
-        return [("features.4.conv.8", nn.Sequential(nn.Conv2d(40, 10, kernel_size=7, stride=2, padding=1, bias=True),
-                                        nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
-                                        nn.Flatten(),
-                                        nn.Linear(360, num_classes)))]
+        if early_exit_version == "v1":
+            # v1
+            return [("features.4.conv.8", nn.Sequential(
+                                            nn.Conv2d(40, 10, kernel_size=7, stride=2, padding=1, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Flatten(),
+                                            nn.Linear(360, num_classes)))]
+        elif early_exit_version == "v2":
+            # v2
+            return [("features.4.conv.8", nn.Sequential(
+                                            nn.Conv2d(40, 40, kernel_size=7, stride=1, padding=3, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Conv2d(40, 60, kernel_size=5, stride=1, padding=1, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Flatten(),
+                                            # nn.Linear(360, 720),
+                                            h_swish(),
+                                            nn.Linear(2160, num_classes)))]
+        elif early_exit_version == "v3":
+            # v3
+            return [("features.4.conv.8", nn.Sequential(
+                                            nn.Conv2d(40, 40, kernel_size=7, stride=2, padding=3, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Flatten(),
+                                            nn.Linear(1960, 1080),
+                                            h_swish(),
+                                            nn.Linear(1080, num_classes)))]
     elif early_exit_position == 2:
-        return [("features.7.conv.8", nn.Sequential(nn.Conv2d(80, 20, kernel_size=7, stride=2, padding=1, bias=True),
-                                        nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
-                                        nn.Flatten(),
-                                        nn.Linear(180, num_classes)))]
+        if early_exit_version == "v1":
+            # v1
+            return [("features.7.conv.8", nn.Sequential(
+                                            nn.Conv2d(80, 20, kernel_size=7, stride=2, padding=2, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Flatten(),
+                                            nn.Linear(180, num_classes)))]
+        elif early_exit_version == "v2":
+            # v2
+            return [("features.7.conv.8", nn.Sequential(
+                                            nn.Conv2d(80, 80, kernel_size=7, stride=2, padding=2, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Flatten(),
+                                            nn.Linear(720, 1080),
+                                            nn.Linear(1080, num_classes)))]
+        elif early_exit_version == "v3":
+            # v3
+            return [("features.7.conv.8", nn.Sequential(
+                                            nn.Conv2d(80, 80, kernel_size=5, stride=1, padding=2, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Conv2d(112, 160, kernel_size=3, stride=1, padding=1, bias=True),
+                                            nn.AvgPool2d(kernel_size=7, stride=1, padding=0),
+                                            h_swish(),
+                                            nn.Flatten(),
+                                            nn.Linear(540, num_classes)))]
+    elif early_exit_position == 3:
+        if early_exit_version == "v1":
+            # v1
+            return [("features.11.conv.8", nn.Sequential(nn.Conv2d(112, 60, kernel_size=7, stride=2, padding=2, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Flatten(),
+                                            nn.Linear(540, num_classes)))]
+        elif early_exit_version == "v2":
+            # v2
+            return [("features.11.conv.8", nn.Sequential(nn.Conv2d(112, 60, kernel_size=7, stride=2, padding=1, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Flatten(),
+                                            nn.Linear(540, 1080),
+                                            h_swish(),
+                                            nn.Linear(1080, num_classes)))]
+        elif early_exit_version == "v3":
+            # v3
+            return [("features.11.conv.8", nn.Sequential(nn.Conv2d(112, 112, kernel_size=5, stride=1, padding=2, bias=True),
+                                            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+                                            nn.Conv2d(112, 160, kernel_size=3, stride=1, padding=1, bias=True),
+                                            nn.AvgPool2d(kernel_size=7, stride=1, padding=0),
+                                            h_swish(),
+                                            nn.Flatten(),
+                                            nn.Linear(160, num_classes)))]
     else:
         raise ValueError("The early_exit_position parameter must be either 1 or 2")
 
@@ -164,9 +234,11 @@ class MobileNetV3(nn.Module):
         assert mode in ['large', 'small']
 
         self._is_early_exit = mobilenet_early_exit_branch is not None
+        self.mobilenet_early_exit_branch = mobilenet_early_exit_branch
         self.num_classes = num_classes
         self.first_parameter_call = True
         self.freezing_schedule = freezing_schedule
+        self.ee_mgr = distiller.EarlyExitMgr()
 
         # building first layer
         input_channel = _make_divisible(16 * width_mult, 8)
@@ -178,31 +250,34 @@ class MobileNetV3(nn.Module):
             layers.append(block(input_channel, exp_size, output_channel, k, s, use_se, use_hs))
             input_channel = output_channel
         self.features = nn.Sequential(*layers)
-        # building last several layers
-        self.conv = nn.Sequential(
-            conv_1x1_bn(input_channel, _make_divisible(exp_size * width_mult, 8)),
-            SELayer(_make_divisible(exp_size * width_mult, 8)) if mode == 'small' else nn.Sequential()
-        )
-        self.avgpool = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            h_swish()
-        )
-        output_channel = _make_divisible(1280 * width_mult, 8) if width_mult > 1.0 else 1280
-        self.classifier = nn.Sequential(
-            nn.Linear(_make_divisible(exp_size * width_mult, 8), output_channel),
-            nn.BatchNorm1d(output_channel) if mode == 'small' else nn.Sequential(),
-            h_swish(),
-            nn.Linear(output_channel, num_classes),
-            nn.BatchNorm1d(num_classes) if mode == 'small' else nn.Sequential(),
-            h_swish() if mode == 'small' else nn.Sequential()
-        )
 
-        self.ee_mgr = distiller.EarlyExitMgr()
+        if self.mobilenet_early_exit_branch not in {"early_exit_1", "early_exit_2", "early_exit_3"}:
+            print("Preparing a early exit network")
+            # building last several layers
+            self.conv = nn.Sequential(
+                conv_1x1_bn(input_channel, _make_divisible(exp_size * width_mult, 8)),
+                SELayer(_make_divisible(exp_size * width_mult, 8)) if mode == 'small' else nn.Sequential()
+            )
+            self.avgpool = nn.Sequential(
+                nn.AdaptiveAvgPool2d((1, 1)),
+                h_swish()
+            )
+            output_channel = _make_divisible(1280 * width_mult, 8) if width_mult > 1.0 else 1280
+            self.classifier = nn.Sequential(
+                nn.Linear(_make_divisible(exp_size * width_mult, 8), output_channel),
+                nn.BatchNorm1d(output_channel) if mode == 'small' else nn.Sequential(),
+                h_swish(),
+                nn.Linear(output_channel, num_classes),
+                nn.BatchNorm1d(num_classes) if mode == 'small' else nn.Sequential(),
+                h_swish() if mode == 'small' else nn.Sequential()
+            )
 
         self._initialize_weights()
 
-    def prepare_early_exit(self, early_exit_mode):
-        self.ee_mgr.attach_exits(self, get_early_exit_definition(early_exit_mode, self.num_classes))
+    def prepare_early_exit(self, early_exit_mode, early_exit_version):
+        self.ee_mgr.attach_exits(self, get_early_exit_definition(early_exit_mode,
+                                                                 early_exit_version,
+                                                                 self.num_classes))
 
     def do_freeze_layer(self, name):
         if self.freezing_schedule is None:
@@ -210,20 +285,27 @@ class MobileNetV3(nn.Module):
         elif self.freezing_schedule == "until_branch_1":
             layer_num = int(name.split('.')[1])
             return layer_num > 4
-        elif self.freezing_schedule in {"only_branch_1", "only_branch_2"}:
+        elif self.freezing_schedule in {"only_branch_1", "only_branch_2", "only_branch_3"}:
             return "branch_net" not in name
         elif self.freezing_schedule == "until_branch_2":
             layer_num = int(name.split('.')[1])
             return layer_num > 7
+        elif self.freezing_schedule == "until_branch_3":
+            layer_num = int(name.split('.')[1])
+            return layer_num > 11
         else:
             return False
 
     def forward(self, x):
         x = self.features(x)
-        x = self.conv(x)
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
+        if self.mobilenet_early_exit_branch not in {"early_exit_1", "early_exit_2", "early_exit_3"}:
+            x = self.conv(x)
+            x = self.avgpool(x)
+            x = x.view(x.size(0), -1)
+            x = self.classifier(x)
+
+        if self.mobilenet_early_exit_branch in {"early_exit_1", "early_exit_2", "early_exit_3"}:
+            return self.ee_mgr.get_exits_outputs(self) + self.ee_mgr.get_exits_outputs(self)
         if self._is_early_exit:
             return self.ee_mgr.get_exits_outputs(self) + [x]
         else:
@@ -276,7 +358,7 @@ def mobilenetv3_duoli(pretrained=False, mobilenet_early_exit_branch=None, **kwar
         ]
     else:
 
-        if mobilenet_early_exit_branch in {None, "trunk_early_exit_1", "trunk_early_exit_2"}:
+        if mobilenet_early_exit_branch in {None, "trunk_early_exit_1", "trunk_early_exit_2", "trunk_early_exit_3"}:
             cfgs = [
                 # k, t, c, SE, NL, s
                 [3,  16,  16, 0, 0, 1],
@@ -314,17 +396,34 @@ def mobilenetv3_duoli(pretrained=False, mobilenet_early_exit_branch=None, **kwar
                 [5, 120,  40, 1, 0, 1],
                 [3, 240,  80, 0, 1, 2],
             ]
+        elif mobilenet_early_exit_branch == "early_exit_3":
+            cfgs = [
+                # k, t, c, SE, NL, s
+                [3,  16,  16, 0, 0, 1],
+                [3,  64,  24, 0, 0, 2],
+                [3,  72,  24, 0, 0, 1],
+                [5,  72,  40, 1, 0, 2],
+                [5, 120,  40, 1, 0, 1],
+                [5, 120,  40, 1, 0, 1],
+                [3, 240,  80, 0, 1, 2],
+                [3, 200,  80, 0, 1, 1],
+                [3, 184,  80, 0, 1, 1],
+                [3, 184,  80, 0, 1, 1],
+                [3, 480, 112, 1, 1, 1]
+            ]
 
         model = MobileNetV3(cfgs, mode=mode, mobilenet_early_exit_branch=mobilenet_early_exit_branch, **kwargs)
         get_early_exit_definition = None
 
         if mobilenet_early_exit_branch in {"early_exit_1", "trunk_early_exit_1"}:
-            model.prepare_early_exit(1)
+            model.prepare_early_exit(1, kwargs["mobilenet_early_exit_branch_version"])
         elif mobilenet_early_exit_branch in {"early_exit_2", "trunk_early_exit_2"}:
-            model.prepare_early_exit(2)
+            model.prepare_early_exit(2, kwargs["mobilenet_early_exit_branch_version"])
+        elif mobilenet_early_exit_branch in {"early_exit_3", "trunk_early_exit_3"}:
+            model.prepare_early_exit(3, kwargs["mobilenet_early_exit_branch_version"])
 
-        # for name, module in model.named_modules():
-        #     print(name)
+        for name, module in model.named_modules():
+            print(name)
 
         if pretrained:
             checkpoint = torch.load(DEFAULT_CHECKPOINT_PATH, map_location=lambda storage, loc: storage)
