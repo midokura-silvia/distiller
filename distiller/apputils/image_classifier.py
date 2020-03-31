@@ -146,20 +146,18 @@ class ClassifierCompressor(object):
         """Evaluate on validation set"""
         self.load_datasets()
         with collectors_context(self.activations_collectors["valid"]) as collectors:
-            top1, top5, vloss = validate(self.val_loader, self.model, self.criterion, 
-                                         [self.pylogger], self.args, epoch)
+            validation_results = validate(self.val_loader, self.model, self.criterion,
+                                          [self.pylogger], self.args, epoch)
             distiller.log_activation_statistics(epoch, "valid", loggers=[self.tflogger],
                                                 collector=collectors["sparsity"])
             save_collectors_data(collectors, msglogger.logdir)
 
         if verbose:
-            stats = ('Performance/Validation/',
-            OrderedDict([('Loss', vloss),
-                         ('Top1', top1),
-                         ('Top5', top5)]))
+            summaries = OrderedDict([(key, value) for key, value in  validation_results.items()])
+            stats = ('Performance/Validation/', summaries)
             distiller.log_training_progress(stats, None, epoch, steps_completed=0,
                                             total_steps=1, log_freq=1, loggers=[self.tflogger])
-        return top1, top5, vloss
+        return validation_results["Total Top-1"], validation_results["Total Top-5"], validation_results["Loss"]
 
     def _finalize_epoch(self, epoch, top1, top5):
         # Update the list of top scores achieved so far, and save the checkpoint
@@ -454,15 +452,7 @@ def _init_learner(args):
     if args.resumed_checkpoint_path:
         model, compression_scheduler, optimizer, start_epoch = apputils.load_checkpoint(
             model, args.resumed_checkpoint_path, model_device=args.device, compression_scheduler=compression_scheduler)
-        if compression_scheduler.quantization_policy is not None:
-            args_qe = copy.deepcopy(args)
 
-            qe_model = copy.deepcopy(model).to(args.device)
-
-            quantizer = quantization.PostTrainLinearQuantizer.from_args(qe_model, args_qe)
-            dummy_input = distiller.get_dummy_input(input_shape=model.input_shape)
-            quantizer.prepare_model(dummy_input)
-            compression_scheduler.quantization_policy.quantizer.update_optimizer(optimizer)
     elif args.load_model_path:
         model = apputils.load_lean_checkpoint(model, args.load_model_path, model_device=args.device)
     if args.reset_optimizer:
@@ -686,7 +676,7 @@ def train(train_loader, model, criterion, optimizer, epoch,
 
         # Compute the gradient and do SGD step
         optimizer.zero_grad()
-        loss.backward()
+        loss.backward(retain_graph=True)
         if compression_scheduler:
             compression_scheduler.before_parameter_optimization(epoch, train_step, steps_per_epoch, optimizer)
         optimizer.step()
@@ -702,7 +692,6 @@ def train(train_loader, model, criterion, optimizer, epoch,
 
         end = time.time()
 
-    #return acc_stats
     # NOTE: this breaks previous behavior, which returned a history of (top1, top5) values
     classerr_1 = classerr.value(1) if classerr.n > 0 else np.nan #args.exiterrors[args.num_exits-1].value(1)
     classerr_5 = classerr.value(5) if classerr.n > 0 else np.nan #args.exiterrors[args.num_exits-1].value(5)
@@ -727,10 +716,10 @@ def test(test_loader, model, criterion, loggers=None, activations_collectors=Non
         activations_collectors = create_activation_stats_collectors(model, None)
 
     with collectors_context(activations_collectors["test"]) as collectors:
-        top1, top5, lossses = _validate(test_loader, model, criterion, loggers, args)
+        validate_results = _validate(test_loader, model, criterion, loggers, args)
         distiller.log_activation_statistics(-1, "test", loggers, collector=collectors['sparsity'])
         save_collectors_data(collectors, msglogger.logdir)
-    return top1, top5, lossses
+    return validate_results
 
 
 # Temporary patch until we refactor early-exit handling
@@ -751,6 +740,8 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1):
             for exitnum in range(args.num_exits):
                 la_string = 'LossAvg' + str(exitnum)
                 stats_dict[la_string] = args.losses_exits[exitnum].mean
+                percentage = 100 * args.exit_taken[exitnum] / float(validation_step * batch_size)
+                stats_dict["Percentage early exit %i" % exitnum] = percentage
                 # Because of the nature of ClassErrorMeter, if an exit is never taken during the batch,
                 # then accessing the value(k) will cause a divide by zero. So we'll build the OrderedDict
                 # accordingly and we will not print for an exit error when that exit is never taken.
@@ -825,10 +816,24 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1):
 
         if args.display_confusion:
             msglogger.info('==> Confusion:\n%s\n', str(confusion.value()))
-        return classerr.value(1), classerr.value(5), losses['objective_loss'].mean
+        return {
+            "Total Top-1": classerr.value(1),
+            "Total Top-5": classerr.value(5),
+            "Loss": losses['objective_loss'].mean
+        }
     else:
         total_top1, total_top5, losses_exits_stats = earlyexit_validate_stats(args)
-        return total_top1, total_top5, losses_exits_stats[args.num_exits-1]
+        return_dict = {
+            "Total Top-1": total_top1,
+            "Total Top-5": total_top5,
+            "Loss": losses_exits_stats[args.num_exits-1]
+        }
+        for exitnum in range(args.num_exits):
+            return_dict["Top-1 Net-%i" % exitnum] = args.exiterrors[exitnum].value(1)
+            return_dict["Top-5 Net-%i" % exitnum] = args.exiterrors[exitnum].value(5)
+            return_dict["Percentage Net-%i" % exitnum] = args.exit_taken[exitnum] / float(total_samples)
+
+        return return_dict  # total_top1, total_top5, losses_exits_stats[args.num_exits-1]
 
 
 def earlyexit_loss(output, target, criterion, args):
