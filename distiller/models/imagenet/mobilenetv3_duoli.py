@@ -8,6 +8,7 @@ arXiv preprint arXiv:1905.02244.
 import torch.nn as nn
 import math
 import torch
+import logging
 import distiller
 
 from distiller.modules import BranchPoint
@@ -257,8 +258,13 @@ class MobileNetV3(nn.Module):
                 m.bias.data.zero_()
 
 
-def mobilenetv3_duoli(pretrained=False, mobilenet_early_exit_branch=None, **kwargs):
+def mobilenetv3_duoli(pretrained=False, mobilenet_early_exit_branch=None, pretrained_checkpoint_path=None, **kwargs):
+    msglogger = logging.getLogger()
     mode = kwargs["mobilenet_mode"]
+    anomalous_keys = None
+    if not pretrained_checkpoint_path:
+        pretrained_checkpoint_path = DEFAULT_CHECKPOINT_PATH
+
     if mode == "small":
         cfgs = [
             # k, t, c, SE, NL, s
@@ -327,7 +333,8 @@ def mobilenetv3_duoli(pretrained=False, mobilenet_early_exit_branch=None, **kwar
         #     print(name)
 
         if pretrained:
-            checkpoint = torch.load(DEFAULT_CHECKPOINT_PATH, map_location=lambda storage, loc: storage)
+            msglogger.info('Loading checkpoint found at {}'.format(pretrained_checkpoint_path))
+            checkpoint = torch.load(pretrained_checkpoint_path, map_location=lambda storage, loc: storage)
             checkpoint["state_dict"] = {key.replace("module.", ""): value for key, value in checkpoint["state_dict"].items()}
             list_new_pairs = []
             for exit_point in model.ee_mgr.exit_points:
@@ -337,10 +344,14 @@ def mobilenetv3_duoli(pretrained=False, mobilenet_early_exit_branch=None, **kwar
             for key, value in list_new_pairs:
                 checkpoint["state_dict"][key] = value
 
-            anomalous_keys = model.load_state_dict(checkpoint['state_dict'], False)
+            try:
+                anomalous_keys = model.load_state_dict(checkpoint['state_dict'], False)
+            except RuntimeError as e:
+                if kwargs.get("strict", True):
+                    raise e
+                msglogger.warning("The checkpoint weight shapes do not exactly match the network definition ones.")
+                msglogger.warning(str(e))
 
-            import logging
-            msglogger = logging.getLogger()
             if anomalous_keys:
                 # This is pytorch 1.1+
                 missing_keys, unexpected_keys = anomalous_keys
