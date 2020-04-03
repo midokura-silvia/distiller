@@ -547,9 +547,10 @@ def save_collectors_data(collectors, directory):
 def load_data(args, fixed_subset=False, sequential=False, load_train=True, load_val=True, load_test=True):
     test_only = not load_train and not load_val
 
+    print("torch.cuda.current_device()", torch.cuda.current_device())
     train_loader, val_loader, test_loader, _ = apputils.load_data(args.dataset,
                               os.path.expanduser(args.data), args.batch_size,
-                              args.workers, args.validation_split, args.deterministic,
+                              args.workers, not args.cpu, args.validation_split, args.deterministic,
                               args.effective_train_size, args.effective_valid_size, args.effective_test_size,
                               fixed_subset, sequential, test_only)
     if test_only:

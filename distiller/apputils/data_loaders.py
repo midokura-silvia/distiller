@@ -64,7 +64,7 @@ def __dataset_factory(dataset):
             'imagenet': imagenet_get_datasets}.get(dataset, None)
 
 
-def load_data(dataset, data_dir, batch_size, workers, validation_split=0.1, deterministic=False,
+def load_data(dataset, data_dir, batch_size, workers, use_gpu=True, validation_split=0.1, deterministic=False,
               effective_train_size=1., effective_valid_size=1., effective_test_size=1.,
               fixed_subset=False, sequential=False, test_only=False):
     """Load a dataset.
@@ -87,7 +87,7 @@ def load_data(dataset, data_dir, batch_size, workers, validation_split=0.1, dete
     if dataset not in DATASETS_NAMES:
         raise ValueError('load_data does not support dataset %s" % dataset')
     datasets_fn = __dataset_factory(dataset)
-    return get_data_loaders(datasets_fn, data_dir, batch_size, workers, 
+    return get_data_loaders(datasets_fn, data_dir, batch_size, workers, use_gpu=use_gpu,
                             validation_split=validation_split,
                             deterministic=deterministic, 
                             effective_train_size=effective_train_size,
@@ -274,7 +274,7 @@ def _get_sampler(data_source, effective_size, fixed_subset=False, sequential=Fal
     return SwitchingSubsetRandomSampler(data_source, effective_size)
 
 
-def get_data_loaders(datasets_fn, data_dir, batch_size, num_workers, validation_split=0.1, deterministic=False,
+def get_data_loaders(datasets_fn, data_dir, batch_size, num_workers, use_gpu=True, validation_split=0.1, deterministic=False,
                      effective_train_size=1., effective_valid_size=1., effective_test_size=1., fixed_subset=False,
                      sequential=False, test_only=False):
     train_dataset, test_dataset = datasets_fn(data_dir, load_train=not test_only, load_test=True)
@@ -288,7 +288,7 @@ def get_data_loaders(datasets_fn, data_dir, batch_size, num_workers, validation_
     test_sampler = _get_sampler(test_indices, effective_test_size, fixed_subset, sequential)
     test_loader = torch.utils.data.DataLoader(test_dataset,
                                               batch_size=batch_size, sampler=test_sampler,
-                                              num_workers=num_workers, pin_memory=True)
+                                              num_workers=num_workers, pin_memory=use_gpu)
 
     input_shape = __image_size(test_dataset)
 
@@ -309,7 +309,7 @@ def get_data_loaders(datasets_fn, data_dir, batch_size, num_workers, validation_
     train_sampler = _get_sampler(train_indices, effective_train_size, fixed_subset, sequential)
     train_loader = torch.utils.data.DataLoader(train_dataset,
                                                batch_size=batch_size, sampler=train_sampler,
-                                               num_workers=num_workers, pin_memory=True,
+                                               num_workers=num_workers, pin_memory=use_gpu,
                                                worker_init_fn=worker_init_fn)
 
     valid_loader = None
@@ -317,7 +317,7 @@ def get_data_loaders(datasets_fn, data_dir, batch_size, num_workers, validation_
         valid_sampler = _get_sampler(valid_indices, effective_valid_size, fixed_subset, sequential)
         valid_loader = torch.utils.data.DataLoader(train_dataset,
                                                    batch_size=batch_size, sampler=valid_sampler,
-                                                   num_workers=num_workers, pin_memory=True,
+                                                   num_workers=num_workers, pin_memory=use_gpu,
                                                    worker_init_fn=worker_init_fn)
 
     # If validation split was 0 we use the test set as the validation set
