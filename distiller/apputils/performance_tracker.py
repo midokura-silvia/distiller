@@ -57,10 +57,10 @@ class SparsityAccuracyTracker(TrainingPerformanceTracker):
         assert all(score in kwargs.keys() for score in ('top1', 'top5'))
         model_sparsity, _, params_nnz_cnt = distiller.model_params_stats(model)
         self.perf_scores_history.append(distiller.MutableNamedTuple({
-            'params_nnz_cnt': -params_nnz_cnt,
-            'sparsity': model_sparsity,
             'top1': kwargs['top1'],
             'top5': kwargs['top5'],
+            'params_nnz_cnt': -params_nnz_cnt,
+            'sparsity': model_sparsity,
             'epoch': epoch}))
         # Keep perf_scores_history sorted from best to worst
         self.perf_scores_history.sort(

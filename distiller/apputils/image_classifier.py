@@ -122,7 +122,7 @@ class ClassifierCompressor(object):
             distiller.log_activation_statistics(epoch, "train", loggers=[self.tflogger],
                                                 collector=collectors["sparsity"])
             if self.args.masks_sparsity:
-                msglogger.info(distiller.masks_sparsity_tbl_summary(self.model, 
+                msglogger.info(distiller.masks_sparsity_tbl_summary(self.model,
                                                                     self.compression_scheduler))
         return top1, top5, loss
 
@@ -133,9 +133,15 @@ class ClassifierCompressor(object):
                                                           input_shape=self.model.input_shape),
                                                       optimizer=self.optimizer)
 
+        time_in = time.time()
         top1, top5, loss = self.train_one_epoch(epoch, verbose)
+        time_train = time.time() - time_in
         if validate:
+            time_in = time.time()
             top1, top5, loss = self.validate_one_epoch(epoch, verbose)
+            time_validation = time.time() - time_in
+        print("Time train: %f" % time_train)
+        print("Time validation: %f" % time_validation)
 
         if self.compression_scheduler:
             self.compression_scheduler.on_epoch_end(epoch, self.optimizer, 
@@ -676,7 +682,7 @@ def train(train_loader, model, criterion, optimizer, epoch,
 
         # Compute the gradient and do SGD step
         optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        loss.backward()
         if compression_scheduler:
             compression_scheduler.before_parameter_optimization(epoch, train_step, steps_per_epoch, optimizer)
         optimizer.step()

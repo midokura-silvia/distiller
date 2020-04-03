@@ -422,9 +422,6 @@ def mobilenetv3_duoli(pretrained=False, mobilenet_early_exit_branch=None, **kwar
         elif mobilenet_early_exit_branch in {"early_exit_3", "trunk_early_exit_3"}:
             model.prepare_early_exit(3, kwargs["mobilenet_early_exit_branch_version"])
 
-        for name, module in model.named_modules():
-            print(name)
-
         if pretrained:
             checkpoint = torch.load(DEFAULT_CHECKPOINT_PATH, map_location=lambda storage, loc: storage)
             checkpoint["state_dict"] = {key.replace("module.", ""): value for key, value in checkpoint["state_dict"].items()}
