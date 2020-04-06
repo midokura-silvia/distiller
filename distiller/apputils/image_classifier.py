@@ -274,6 +274,9 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                         help='path to checkpoint to load weights from (excluding other fields) (experimental)')
     load_checkpoint_group.add_argument('--pretrained', dest='pretrained', action='store_true',
                         help='use pre-trained model')
+    load_checkpoint_group.add_argument('--from-pretrained', dest='pretrained_checkpoint_path', default='',
+                        type=str, metavar='PATH',
+                        help='path to latest checkpoint. Use to fine-tune a pretrained network.')
     load_checkpoint_group.add_argument("--strict", dest="strict", action="store_true",
                                        help="Load checkpoint with strict constraints in shape and key matching")
     load_checkpoint_group.add_argument('--reset-optimizer', action='store_true',
